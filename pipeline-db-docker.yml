@@ -9,7 +9,6 @@ variables:
   ACR_NAME: 'crgrupo13'  # Se debe colocar el Nombre de tu Azure Container Registry (ACR)
   ACR_USERNAME: 'crgrupo13'  # Se debe colocar el Nombre de usuario del ACR
   ACR_PASSWORD: '359jDWpNOVfLo14QzH1cEtRhxYq8DVuyICSCyWsQnm+ACRDGZjKx'  # Se debe colocar la Contraseña del ACR
-  ENV_NAME: 'VMLinuxDockerG13'
 
 stages:
   - stage: Deploy
@@ -17,7 +16,7 @@ stages:
       - deployment: DeployToVM
         displayName: 'Deploy MySQL to VM'
         environment:
-          name: '$(ENV_NAME)'  # Nombre del entorno configurado en Azure DevOps
+          name: 'VMLinuxDockerG13'  # Nombre del entorno configurado en Azure DevOps
           resourceType: VirtualMachine  # Especifica que se conecta a una máquina virtual
         strategy:
           runOnce:
