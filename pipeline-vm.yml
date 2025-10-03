@@ -1,0 +1,124 @@
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  azureSubscription: 'sc-grupo-13'  # Nombre del servicio de conexión en Azure DevOp
+  location: 'westus3'
+  resourceGroupName: 'rg-grupo-13' # Este es un nombre que debe cambiar al que crearon.
+  virtualNetworkName: 'vr-grupo-13'
+  subnetName: 'subr-grupo-13'
+  addressPrefix: '10.0.1.0/24'
+  subnetPrefix: '10.0.1.0/26'
+  securityGroupName: 'sg-grupo-13'
+  publicIpName: 'vm-grupo-13-ip'
+  vmName: 'vm-grupo-13'
+  vmSize: 'Standard_B1s'  # SKU disponible en westus3
+  adminUsername: 'ssh-grupo-13'
+  adminPassword: 'Devopsgrupo13'  # Contraseña en texto plano (ajustar según necesidad)
+
+  # Variables de la imagen
+  imagePublisher: 'Canonical'
+  imageOffer: '0001-com-ubuntu-server-jammy'
+  imageSku: '22_04-lts-gen2'
+  imageVersion: 'latest'  # Versión específica de la imagen
+
+steps:
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: $(azureSubscription)
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      set -e  # Termina el script si cualquier comando falla
+
+      # Crear un grupo de recursos
+      echo "Creando grupo de recursos..."
+      az group create --name $(resourceGroupName) --location "$(location)"
+      echo "Grupo de recursos creado."
+
+      # Crear una red virtual con un segmento de red
+      echo "Creando red virtual..."
+      az network vnet create --resource-group $(resourceGroupName) --name $(virtualNetworkName) --address-prefix $(addressPrefix) --subnet-name $(subnetName) --subnet-prefix $(subnetPrefix)
+      echo "Red virtual creada."
+      az network vnet wait --resource-group $(resourceGroupName) --name $(virtualNetworkName) --created
+
+      # Crear un grupo de seguridad de red
+      echo "Creando grupo de seguridad de red..."
+      az network nsg create --resource-group $(resourceGroupName) --name $(securityGroupName)
+      echo "Grupo de seguridad de red creado."
+      az network nsg wait --resource-group $(resourceGroupName) --name $(securityGroupName) --created
+
+      # Permitir acceso a los puertos 22, 80 y icmp
+      echo "Configurando reglas de NSG..."
+      az network nsg rule create --resource-group $(resourceGroupName) --nsg-name $(securityGroupName) --name AllowSSH --protocol tcp --direction inbound --priority 1000 --source-address-prefix '*' --source-port-range '*' --destination-address-prefix '*' --destination-port-range 22 --access allow
+      az network nsg rule create --resource-group $(resourceGroupName) --nsg-name $(securityGroupName) --name AllowHTTP --protocol tcp --direction inbound --priority 1001 --source-address-prefix '*' --source-port-range '*' --destination-address-prefix '*' --destination-port-range 80 --access allow
+      az network nsg rule create --resource-group $(resourceGroupName) --nsg-name $(securityGroupName) --name AllowICMP --protocol icmp --direction inbound --priority 1002 --source-address-prefix '*' --source-port-range '*' --destination-address-prefix '*' --destination-port-range '*' --access allow
+
+      echo "Reglas de NSG configuradas."
+
+      # Crear una dirección IP pública
+      if az network public-ip show --resource-group $(resourceGroupName) --name $(publicIpName) >/dev/null 2>&1; then
+        echo "La IP pública '$(publicIpName)' ya existe; no se modifica (las zonas son inmutables)."
+      else
+        # westus3 es zonal: crear explícitamente en zona 1 para evitar cambios de zona en futuras corridas
+        az network public-ip create \
+          --resource-group $(resourceGroupName) \
+          --name $(publicIpName) \
+          --sku Standard \
+          --allocation-method Static \
+          --zone 1
+        echo "IP pública creada en zona 1."
+      fi
+      az network public-ip wait --resource-group $(resourceGroupName) --name $(publicIpName) --created
+
+      # Crear la máquina virtual con la IP pública asignada, usando los parámetros de imagen especificados
+      if az vm show --resource-group $(resourceGroupName) --name $(vmName) >/dev/null 2>&1; then
+        echo "VM '$(vmName)' ya existe; no se recrea."
+      else
+        # ID de la IP pública
+        PIP_ID=$(az network public-ip show --resource-group $(resourceGroupName) --name $(publicIpName) --query id -o tsv)
+
+        # ¿Existe alguna NIC que ya use esta IP pública?
+        EXISTING_NIC_NAME=$(az network nic list --resource-group $(resourceGroupName) \
+          --query "[?ipConfigurations[?publicIpAddress.id=='${PIP_ID}']].name | [0]" -o tsv)
+
+        if [ -n "$EXISTING_NIC_NAME" ] && [ "$EXISTING_NIC_NAME" != "null" ]; then
+          echo "Reutilizando NIC existente '$EXISTING_NIC_NAME' que ya tiene la IP pública asociada."
+          az vm create \
+            --resource-group $(resourceGroupName) \
+            --name $(vmName) \
+            --image $(imagePublisher):$(imageOffer):$(imageSku):$(imageVersion) \
+            --size $(vmSize) \
+            --admin-username $(adminUsername) \
+            --admin-password $(adminPassword) \
+            --nics "$EXISTING_NIC_NAME"
+        else
+          echo "No hay NIC usando la IP pública. Creando NIC nueva y asociándola a la IP..."
+          az network nic create \
+            --resource-group $(resourceGroupName) \
+            --name "$(vmName)-nic" \
+            --vnet-name $(virtualNetworkName) \
+            --subnet $(subnetName) \
+            --network-security-group $(securityGroupName) \
+            --public-ip-address $(publicIpName) 1>/dev/null
+          az vm create \
+            --resource-group $(resourceGroupName) \
+            --name $(vmName) \
+            --image $(imagePublisher):$(imageOffer):$(imageSku):$(imageVersion) \
+            --size $(vmSize) \
+            --admin-username $(adminUsername) \
+            --admin-password $(adminPassword) \
+            --nics "$(vmName)-nic"
+        fi
+        echo "Máquina virtual creada."
+      fi
+      az vm wait --resource-group $(resourceGroupName) --name $(vmName) --created
+
+      # Instalar Apache y configurar la página de prueba
+      echo "Instalando Apache y configurando la página de prueba..."
+      az vm run-command invoke --resource-group $(resourceGroupName) --name $(vmName) --command-id RunShellScript --scripts "sudo apt update && sudo apt install -y apache2"
+      az vm run-command invoke --resource-group $(resourceGroupName) --name $(vmName) --command-id RunShellScript --scripts "echo 'hola curso devops hemos automatizado el despliegue de maquina virtual desde azure devops' | sudo tee /var/www/html/index.html"
+      echo "Apache instalado y página de bienvenida configurada."
