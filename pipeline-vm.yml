@@ -4,6 +4,7 @@ trigger:
 pool:
   vmImage: 'ubuntu-latest'
 
+#Variables
 variables:
   azureSubscription: 'sc-grupo-13'  # Nombre del servicio de conexión en Azure DevOp
   location: 'westus3'
